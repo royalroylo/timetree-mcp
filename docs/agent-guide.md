@@ -34,18 +34,9 @@ Use read tools freely after authentication:
 4. `timetree_list_memos` for category-2 memos.
 5. Metadata tools for comments, labels, members, and virtual members.
 
-For writes, follow this sequence:
-
-```text
-inspect the target
--> explain the requested mutation
--> call the write tool with confirm=true
--> report the returned result
-```
-
-Every write tool rejects calls without `confirm: true`. This includes event,
-memo, comment, and label changes. Deletion is irreversible, so require a
-separate explicit user confirmation immediately before the call.
+This fork is read-only: there are no write tools, and the HTTP layer refuses
+any request other than GET (plus the login PUT). If a user asks to create,
+change, or delete TimeTree data, say it is not supported here.
 
 ## Monitoring
 
@@ -60,6 +51,4 @@ the client exits.
   user to paste a password into chat.
 - If a calendar returns sync error `-425`, preserve the usable calendars and
   report `skipped_calendars`.
-- If a write fails, report the error without retrying destructive operations
-  automatically.
 - Treat the TimeTree web endpoints as unofficial and expect service changes.

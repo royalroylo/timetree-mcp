@@ -1,4 +1,4 @@
-"""stdio MCP server for read and explicitly-confirmed write TimeTree operations."""
+"""stdio MCP server for read-only TimeTree operations (this fork exposes no write tools)."""
 
 from __future__ import annotations
 
@@ -14,19 +14,12 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from timetree_mcp.monitor import MonitorManager
-from timetree_mcp.operations import (
-    build_create_event_payload,
-    build_memo_payload,
-    build_memo_update_payload,
-    build_update_event_payload,
-    calendar_id_value,
-    require_confirmation,
-)
+from timetree_mcp.operations import calendar_id_value
 
 
 class BrowserReader(Protocol):
     def read(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Read or mutate one operation through the authenticated TimeTree browser session."""
+        """Run one read operation through the authenticated TimeTree session."""
 
 
 SUPPORTED_PROTOCOL_VERSIONS = (
@@ -53,19 +46,6 @@ READ_TOOLS = {
     "timetree_keychain_status",
 }
 
-WRITE_TOOLS = {
-    "timetree_create_event",
-    "timetree_update_event",
-    "timetree_delete_event",
-    "timetree_create_memo",
-    "timetree_update_memo",
-    "timetree_delete_memo",
-    "timetree_add_event_comment",
-    "timetree_update_event_comment",
-    "timetree_delete_event_comment",
-    "timetree_update_calendar_labels",
-}
-
 TIME_SCHEMA = {
     "oneOf": [
         {"type": "string", "description": "ISO-8601 datetime, preferably with timezone offset."},
@@ -73,22 +53,9 @@ TIME_SCHEMA = {
     ]
 }
 ID_SCHEMA = {"oneOf": [{"type": "string"}, {"type": "integer"}]}
-CHECKLIST_SCHEMA = {
-    "type": "array",
-    "items": {
-        "type": "object",
-        "properties": {"checked": {"type": "boolean"}, "title": {"type": "string"}},
-        "required": ["title"],
-        "additionalProperties": False,
-    },
-}
-VIRTUAL_ATTENDEES_SCHEMA = {
-    "type": "array",
-    "items": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
-}
 
-# MCP annotations are client-facing hints; confirmation checks remain the
-# deterministic guard for every TimeTree write.
+# MCP annotations are client-facing hints; the reader itself refuses any
+# TimeTree data write, so these are informational only.
 TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
     **{
         name: {
@@ -115,66 +82,6 @@ TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
         "idempotentHint": True,
         "openWorldHint": False,
     },
-    "timetree_create_event": {
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    },
-    "timetree_create_memo": {
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    },
-    "timetree_add_event_comment": {
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    },
-    "timetree_update_event": {
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    },
-    "timetree_update_memo": {
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    },
-    "timetree_update_event_comment": {
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    },
-    "timetree_update_calendar_labels": {
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    },
-    "timetree_delete_event": {
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
-    "timetree_delete_memo": {
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
-    "timetree_delete_event_comment": {
-        "readOnlyHint": False,
-        "destructiveHint": True,
-        "idempotentHint": True,
-        "openWorldHint": True,
-    },
     "timetree_start_monitor": {
         "readOnlyHint": False,
         "destructiveHint": False,
@@ -188,11 +95,6 @@ TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
         "openWorldHint": False,
     },
 }
-CONFIRM_SCHEMA = {
-    "type": "boolean",
-    "const": True,
-    "description": "Must be true to authorize this real TimeTree write.",
-}
 
 
 def _object_schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -204,40 +106,6 @@ def _object_schema(properties: dict[str, Any], required: list[str] | None = None
     if required:
         schema["required"] = required
     return schema
-
-
-def _event_common_properties() -> dict[str, Any]:
-    return {
-        "title": {"type": "string"},
-        "all_day": {"type": "boolean"},
-        "start_at": TIME_SCHEMA,
-        "start_timezone": {"type": "string"},
-        "end_at": TIME_SCHEMA,
-        "end_timezone": {"type": "string"},
-        "label_id": {"type": "integer", "minimum": 1, "maximum": 10},
-        "category": {"type": "integer"},
-        "note": {"type": "string"},
-        "location": {"type": "string"},
-        "url": {"type": "string"},
-        "attendees": {"type": "array", "items": ID_SCHEMA},
-        "recurrences": {"type": "array"},
-        "alerts": {"type": "array"},
-        "file_uuids": {"type": "array", "items": {"type": "string"}},
-        "checklist": CHECKLIST_SCHEMA,
-        "virtual_user_attendees": VIRTUAL_ATTENDEES_SCHEMA,
-    }
-
-
-def _memo_common_properties() -> dict[str, Any]:
-    return {
-        "title": {"type": "string"},
-        "note": {"type": "string"},
-        "label_id": {"type": "integer", "minimum": 1, "maximum": 10},
-        "location": {"type": "string"},
-        "url": {"type": "string"},
-        "checklist": CHECKLIST_SCHEMA,
-        "virtual_user_attendees": VIRTUAL_ATTENDEES_SCHEMA,
-    }
 
 
 class TimeTreeMcpServer:
@@ -279,25 +147,14 @@ class TimeTreeMcpServer:
                 "capabilities": {"tools": {}, "logging": {}},
                 "serverInfo": {"name": "timetree-mcp", "version": SERVER_VERSION},
                 "instructions": (
-                    "TimeTree read/write access through the direct HTTPS session. "
-                    "Write tools require confirm=true. Monitor notifications use notifications/message."
+                    "Read-only TimeTree access through the direct HTTPS session. "
+                    "This server exposes no write tools. Monitor notifications use notifications/message."
                 ),
             },
         )
 
     @staticmethod
     def tool_definitions() -> list[dict[str, Any]]:
-        event_create = _event_common_properties()
-        event_create.update({"calendar_id": ID_SCHEMA, "confirm": CONFIRM_SCHEMA})
-        event_update = _event_common_properties()
-        event_update.update({"calendar_id": ID_SCHEMA, "event_uuid": {"type": "string"}, "confirm": CONFIRM_SCHEMA})
-        event_delete = {"calendar_id": ID_SCHEMA, "event_uuid": {"type": "string"}, "confirm": CONFIRM_SCHEMA}
-        memo_create = _memo_common_properties()
-        memo_create.update({"calendar_id": ID_SCHEMA, "date": {"type": "string", "pattern": DATE_RE.pattern}, "confirm": CONFIRM_SCHEMA})
-        memo_update = _memo_common_properties()
-        memo_update.update({"calendar_id": ID_SCHEMA, "memo_uuid": {"type": "string"}, "confirm": CONFIRM_SCHEMA})
-        memo_delete = {"calendar_id": ID_SCHEMA, "memo_uuid": {"type": "string"}, "confirm": CONFIRM_SCHEMA}
-
         tools = [
             {"name": "timetree_list_calendars", "description": "Read the calendars available in the authenticated TimeTree account.", "inputSchema": _object_schema({})},
             {"name": "timetree_list_events", "description": "Read TimeTree events overlapping a date range. This tool is read-only.", "inputSchema": _object_schema({"start_date": {"type": "string", "description": "Inclusive YYYY-MM-DD date."}, "end_date": {"type": "string", "description": "Exclusive YYYY-MM-DD date."}, "calendar_id": ID_SCHEMA, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100}})},
@@ -305,19 +162,9 @@ class TimeTreeMcpServer:
             {"name": "timetree_login", "description": "Login to TimeTree over direct HTTPS using TIMETREE_EMAIL and TIMETREE_PASSWORD from the MCP environment; no browser is used.", "inputSchema": _object_schema({})},
             {"name": "timetree_logout", "description": "Clear the in-memory TimeTree session cookie and CSRF token.", "inputSchema": _object_schema({})},
             {"name": "timetree_keychain_status", "description": "Report whether the macOS Keychain contains TimeTree email/password items; never returns their values.", "inputSchema": _object_schema({})},
-            {"name": "timetree_create_event", "description": "Create a TimeTree event. Requires confirm=true and writes to the real calendar.", "inputSchema": _object_schema(event_create, ["calendar_id", "title", "start_at", "end_at", "confirm"])},
-            {"name": "timetree_update_event", "description": "Update selected fields of a TimeTree event. Requires confirm=true.", "inputSchema": _object_schema(event_update, ["calendar_id", "event_uuid", "confirm"])},
-            {"name": "timetree_delete_event", "description": "Delete a TimeTree event. This cannot be undone and requires confirm=true.", "inputSchema": _object_schema(event_delete, ["calendar_id", "event_uuid", "confirm"])},
             {"name": "timetree_list_memos", "description": "Read category-2 TimeTree memos from a calendar.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA, "updated_after": TIME_SCHEMA, "limit": {"type": "integer", "minimum": 1, "maximum": 500}}, ["calendar_id"])},
-            {"name": "timetree_create_memo", "description": "Create a TimeTree memo. Requires confirm=true.", "inputSchema": _object_schema(memo_create, ["calendar_id", "title", "confirm"])},
-            {"name": "timetree_update_memo", "description": "Update a TimeTree memo. Requires confirm=true.", "inputSchema": _object_schema(memo_update, ["calendar_id", "memo_uuid", "confirm"])},
-            {"name": "timetree_delete_memo", "description": "Delete a TimeTree memo. This cannot be undone and requires confirm=true.", "inputSchema": _object_schema(memo_delete, ["calendar_id", "memo_uuid", "confirm"])},
             {"name": "timetree_list_event_comments", "description": "Read comments attached to a TimeTree event.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA, "event_uuid": {"type": "string"}}, ["calendar_id", "event_uuid"])},
-            {"name": "timetree_add_event_comment", "description": "Add a comment to a TimeTree event. Requires confirm=true.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA, "event_uuid": {"type": "string"}, "content": {"type": "string"}, "silent": {"type": "boolean", "default": True}, "confirm": CONFIRM_SCHEMA}, ["calendar_id", "event_uuid", "content", "confirm"])},
-            {"name": "timetree_update_event_comment", "description": "Update a TimeTree event comment. Requires confirm=true.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA, "event_uuid": {"type": "string"}, "comment_id": {"type": "string"}, "content": {"type": "string"}, "confirm": CONFIRM_SCHEMA}, ["calendar_id", "event_uuid", "comment_id", "content", "confirm"])},
-            {"name": "timetree_delete_event_comment", "description": "Delete a TimeTree event comment. Requires confirm=true.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA, "event_uuid": {"type": "string"}, "comment_id": {"type": "string"}, "confirm": CONFIRM_SCHEMA}, ["calendar_id", "event_uuid", "comment_id", "confirm"])},
             {"name": "timetree_get_calendar_labels", "description": "Read all labels for a TimeTree calendar.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA}, ["calendar_id"])},
-            {"name": "timetree_update_calendar_labels", "description": "Merge-update TimeTree label names/colors. Requires confirm=true; omitted labels are preserved.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA, "labels": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"id": {"type": "integer", "minimum": 1, "maximum": 10}, "name": {"type": "string"}, "color": {"type": "integer"}}, "required": ["id"], "additionalProperties": False}}, "confirm": CONFIRM_SCHEMA}, ["calendar_id", "labels", "confirm"])},
             {"name": "timetree_get_calendar_members", "description": "Read active members of a TimeTree calendar, optionally including deactivated members.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA, "include_deactivated": {"type": "boolean", "default": False}}, ["calendar_id"])},
             {"name": "timetree_get_calendar_virtual_members", "description": "Read virtual members of a TimeTree calendar, optionally including deactivated members.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA, "include_deactivated": {"type": "boolean", "default": False}}, ["calendar_id"])},
             {"name": "timetree_start_monitor", "description": "Start background polling for calendar changes; changes are sent as MCP notifications/message.", "inputSchema": _object_schema({"calendar_id": ID_SCHEMA, "interval_seconds": {"type": "integer", "minimum": 30, "maximum": 3600, "default": 300}})},
@@ -336,10 +183,8 @@ class TimeTreeMcpServer:
 
         operation_by_tool = {
             "timetree_status": "status", "timetree_login": "login", "timetree_logout": "logout", "timetree_keychain_status": "keychain_status", "timetree_list_calendars": "list_calendars", "timetree_list_events": "list_events",
-            "timetree_create_event": "create_event", "timetree_update_event": "update_event", "timetree_delete_event": "delete_event",
-            "timetree_list_memos": "list_memos", "timetree_create_memo": "create_memo", "timetree_update_memo": "update_memo", "timetree_delete_memo": "delete_memo",
-            "timetree_list_event_comments": "list_event_comments", "timetree_add_event_comment": "add_event_comment", "timetree_update_event_comment": "update_event_comment", "timetree_delete_event_comment": "delete_event_comment",
-            "timetree_get_calendar_labels": "get_calendar_labels", "timetree_update_calendar_labels": "update_calendar_labels", "timetree_get_calendar_members": "get_calendar_members", "timetree_get_calendar_virtual_members": "get_calendar_virtual_members",
+            "timetree_list_memos": "list_memos", "timetree_list_event_comments": "list_event_comments",
+            "timetree_get_calendar_labels": "get_calendar_labels", "timetree_get_calendar_members": "get_calendar_members", "timetree_get_calendar_virtual_members": "get_calendar_virtual_members",
         }
 
         if name == "timetree_monitor_status":
@@ -371,22 +216,10 @@ class TimeTreeMcpServer:
 
     @staticmethod
     def _allowed_arguments(name: str) -> set[str]:
-        base = {
-            "calendar_id", "confirm", "title", "all_day", "start_at", "start_timezone", "end_at", "end_timezone",
-            "label_id", "category", "note", "location", "url", "attendees", "recurrences", "alerts", "file_uuids",
-            "checklist", "virtual_user_attendees", "event_uuid", "memo_uuid", "comment_id", "content", "silent",
-            "date", "updated_after", "limit", "query", "start_date", "end_date", "labels", "include_deactivated", "interval_seconds",
-        }
         specific = {
             "timetree_status": set(), "timetree_login": set(), "timetree_logout": set(), "timetree_keychain_status": set(), "timetree_list_calendars": set(), "timetree_list_events": {"start_date", "end_date", "calendar_id", "query", "limit"},
-            "timetree_create_event": base - {"event_uuid", "memo_uuid", "comment_id", "date", "updated_after", "limit", "query", "start_date", "end_date", "labels", "include_deactivated", "interval_seconds"},
-            "timetree_update_event": base - {"memo_uuid", "comment_id", "date", "updated_after", "limit", "query", "start_date", "end_date", "labels", "include_deactivated", "interval_seconds"},
-            "timetree_delete_event": {"calendar_id", "event_uuid", "confirm"}, "timetree_list_memos": {"calendar_id", "updated_after", "limit"},
-            "timetree_create_memo": {"calendar_id", "title", "note", "label_id", "location", "url", "date", "checklist", "virtual_user_attendees", "confirm"},
-            "timetree_update_memo": {"calendar_id", "memo_uuid", "title", "note", "label_id", "location", "url", "checklist", "virtual_user_attendees", "confirm"}, "timetree_delete_memo": {"calendar_id", "memo_uuid", "confirm"},
-            "timetree_list_event_comments": {"calendar_id", "event_uuid"}, "timetree_add_event_comment": {"calendar_id", "event_uuid", "content", "silent", "confirm"},
-            "timetree_update_event_comment": {"calendar_id", "event_uuid", "comment_id", "content", "confirm"}, "timetree_delete_event_comment": {"calendar_id", "event_uuid", "comment_id", "confirm"},
-            "timetree_get_calendar_labels": {"calendar_id"}, "timetree_update_calendar_labels": {"calendar_id", "labels", "confirm"},
+            "timetree_list_memos": {"calendar_id", "updated_after", "limit"}, "timetree_list_event_comments": {"calendar_id", "event_uuid"},
+            "timetree_get_calendar_labels": {"calendar_id"},
             "timetree_get_calendar_members": {"calendar_id", "include_deactivated"}, "timetree_get_calendar_virtual_members": {"calendar_id", "include_deactivated"},
             "timetree_start_monitor": {"calendar_id", "interval_seconds"}, "timetree_stop_monitor": set(), "timetree_monitor_status": set(),
         }
@@ -400,11 +233,9 @@ class TimeTreeMcpServer:
         unknown = sorted(set(arguments) - allowed)
         if unknown:
             raise ValueError(f"Unsupported argument(s): {', '.join(unknown)}")
-        if name in WRITE_TOOLS:
-            require_confirmation(arguments)
         if "calendar_id" in arguments:
             calendar_id_value(arguments["calendar_id"])
-        for key in ("start_date", "end_date", "date"):
+        for key in ("start_date", "end_date"):
             if key in arguments:
                 value = arguments[key]
                 if not isinstance(value, str) or not DATE_RE.fullmatch(value):
@@ -421,34 +252,15 @@ class TimeTreeMcpServer:
             value = arguments["interval_seconds"]
             if not isinstance(value, int) or isinstance(value, bool) or not 30 <= value <= 3600:
                 raise ValueError("interval_seconds must be an integer from 30 to 3600")
-        for key in ("event_uuid", "memo_uuid", "comment_id", "content", "title"):
+        for key in ("event_uuid",):
             if key in arguments and not isinstance(arguments[key], str):
                 raise ValueError(f"{key} must be a string")
-        if "labels" in arguments:
-            if not isinstance(arguments["labels"], list) or not arguments["labels"]:
-                raise ValueError("labels must be a non-empty list")
-            for label in arguments["labels"]:
-                if not isinstance(label, dict) or not isinstance(label.get("id"), int) or not 1 <= label["id"] <= 10:
-                    raise ValueError("each label must have an integer id from 1 to 10")
 
     @staticmethod
     def _prepare_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if name == "timetree_create_event":
-            return {"calendar_id": calendar_id_value(arguments["calendar_id"]), "payload": build_create_event_payload(arguments)}
-        if name == "timetree_update_event":
-            return {"calendar_id": calendar_id_value(arguments["calendar_id"]), "event_uuid": arguments["event_uuid"], "payload": build_update_event_payload(arguments)}
-        if name == "timetree_delete_event":
-            return {"calendar_id": calendar_id_value(arguments["calendar_id"]), "event_uuid": arguments["event_uuid"]}
-        if name == "timetree_create_memo":
-            return {"calendar_id": calendar_id_value(arguments["calendar_id"]), "payload": build_memo_payload(arguments)}
-        if name == "timetree_update_memo":
-            return {"calendar_id": calendar_id_value(arguments["calendar_id"]), "event_uuid": arguments["memo_uuid"], "payload": build_memo_update_payload(arguments)}
-        if name == "timetree_delete_memo":
-            return {"calendar_id": calendar_id_value(arguments["calendar_id"]), "event_uuid": arguments["memo_uuid"]}
-        if name in {"timetree_add_event_comment", "timetree_update_event_comment", "timetree_delete_event_comment", "timetree_get_calendar_labels", "timetree_update_calendar_labels", "timetree_get_calendar_members", "timetree_get_calendar_virtual_members"}:
+        if name in {"timetree_get_calendar_labels", "timetree_get_calendar_members", "timetree_get_calendar_virtual_members"}:
             prepared = dict(arguments)
             prepared["calendar_id"] = calendar_id_value(arguments["calendar_id"])
-            prepared.pop("confirm", None)
             return prepared
         return arguments
 

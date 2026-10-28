@@ -118,17 +118,20 @@ class BrowserReaderTests(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["comments"][0]["content"], "hello")
 
-    def test_write_script_contains_csrf_header_and_known_endpoint_shapes(self):
-        script = _script_for(
-            "create_event",
-            {"calendar_id": "personal", "payload": {"title": "Test"}},
-        )
+    def test_write_operations_are_rejected_before_running_browser(self):
+        calls = []
+        reader = EgoBrowserReader(runner=lambda script: calls.append(script) or "")
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            reader.read("create_event", {"calendar_id": "personal", "payload": {"title": "Test"}})
+        self.assertEqual(calls, [])
 
-        self.assertIn("X-CSRF-Token", script)
-        self.assertIn("/api/v1/calendar/", script)
-        self.assertIn("/event", script)
-        self.assertIn("method: \"POST\"", script)
+    def test_generated_script_has_no_write_endpoints_or_csrf(self):
+        script = _script_for("list_calendars", {})
 
+        self.assertNotIn("X-CSRF-Token", script)
+        self.assertNotIn('method: "PUT"', script)
+        self.assertNotIn('method: "DELETE"', script)
+        self.assertIn("Blocked non-read TimeTree request", script)
 
     @unittest.skipUnless(shutil.which("node"), "Node required for browser script behavior")
     def test_generated_calendar_filter_handles_active_and_invalid_values(self):

@@ -7,18 +7,22 @@
 [![Node.js >=18](https://img.shields.io/badge/node-%3E%3D18-339933)](package.json)
 [![Python >=3.10](https://img.shields.io/badge/python-%3E%3D3.10-3776AB)](pyproject.toml)
 
-**讓你的 AI 助手讀懂，也安全地更新 TimeTree。**
+> [!IMPORTANT]
+> **唯讀 fork。** 這個 fork 已移除所有 TimeTree 寫入功能：不註冊任何 create／update／delete／comment／label 寫入 tool，
+> HTTP reader 在 request 層只允許 `GET`（外加登入用的 `PUT /api/v1/auth/email/signin`），其他 method 一律拋出
+> `ReadOnlyViolationError`，舊的 ego-browser transport 也同樣只允許讀取。不再依賴 `confirm: true` 作為安全機制。
+> 請從已審查、固定 commit 的本 fork 原始碼執行，不要用 `npx --yes timetree-mcp`（那會抓 upstream 最新版，含寫入功能）。
+
+**讓你的 AI 助手讀懂 TimeTree（唯讀）。**
 
 不用再一邊聊天、一邊切回行事曆找資料。TimeTree MCP 是一個非官方的
 [Model Context Protocol](https://modelcontextprotocol.io/) server，能把行程、
-備忘、留言與行事曆資訊帶進支援 MCP 的 AI 助手；需要建立、修改或刪除內容
-時，只有在你明確確認後才會真的寫入。
+備忘、留言與行事曆資訊帶進支援 MCP 的 AI 助手。本 fork 只讀取，不會建立、修改或刪除任何內容。
 
 你可以直接這樣問：
 
 - 「幫我整理這週的家庭行程，找出時間衝突。」
 - 「下個月有哪些活動提到『牙醫』？」
-- 「在家庭行事曆建立週六下午兩點的聚餐，先讓我確認內容。」
 - 「監控這個行事曆，有新增、修改或移除時通知我。」
 
 <p align="center">
@@ -30,8 +34,8 @@
 | | 重點 |
 |---|---|
 | **對話中完成行事曆工作** | 查詢行程、搜尋活動、管理備忘與留言，不必離開正在使用的 AI 助手。 |
-| **每次寫入都由你決定** | 所有新增、修改、刪除操作都必須明確傳入 `confirm: true`。 |
-| **敏感資料留在本機** | credentials 不會出現在 MCP tool arguments；session cookie 與 CSRF token 只存在 process memory。 |
+| **只讀不寫** | 沒有任何寫入 tool，request 層也擋掉所有非 GET 請求。 |
+| **敏感資料留在本機** | credentials 不會出現在 MCP tool arguments；session cookie 只存在 process memory。 |
 | **直接、輕量** | 預設由 Python direct client 透過 HTTPS 連線，不啟動瀏覽器，runtime 只使用 Python standard library。 |
 | **掌握行事曆變化** | 可在背景 polling，並透過 MCP notifications 回報新增、修改與移除。 |
 
@@ -44,11 +48,8 @@
 ## 支援的操作
 
 - 讀取 calendars、events、memos、comments、labels 與 members。
-- 建立、更新、刪除 events 與 memos。
-- 新增、更新、刪除 event comments。
-- 以 merge 方式更新 calendar labels。
 - 背景監控 calendar 變更並發送 MCP notifications。
-- 所有寫入操作都要求明確傳入 `confirm: true`。
+- 不提供任何寫入操作（events、memos、comments、labels 皆唯讀）。
 - 不把 credentials 放進 MCP tool arguments，authenticated session 只保存在記憶體。
 
 ## 快速開始
@@ -162,14 +163,7 @@ codex mcp add timetree \
 
 ### 寫入
 
-- `timetree_create_event`、`timetree_update_event`、`timetree_delete_event`
-- `timetree_create_memo`、`timetree_update_memo`、`timetree_delete_memo`
-- `timetree_add_event_comment`、`timetree_update_event_comment`、
-  `timetree_delete_event_comment`
-- `timetree_update_calendar_labels`
-
-時間可傳 ISO-8601 字串或 Unix milliseconds；所有寫入工具都必須明確傳
-`confirm: true`。成員邀請／移除 endpoint 尚未驗證，因此刻意未加入。
+本 fork 不提供寫入 tool。時間參數可傳 ISO-8601 字串或 Unix milliseconds。
 
 若某些舊 calendar 的 TimeTree sync endpoint 回傳 `-425`，events 查詢會跳過
 該 calendar，並在 `skipped_calendars` 欄位回報，不會讓其他可讀 calendars

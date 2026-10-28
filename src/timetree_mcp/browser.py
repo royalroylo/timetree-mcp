@@ -1,4 +1,4 @@
-"""Legacy ego-browser reader kept as an optional compatibility transport."""
+"""Legacy ego-browser reader kept as an optional, read-only compatibility transport."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ from .parser import normalize_event, query_events
 
 RESULT_MARKER = "__TIMETREE_MCP_RESULT__"
 TASK_SPACE_NAME = os.environ.get("TIMETREE_EGO_TASK_SPACE", "TimeTree readonly MCP")
-WRITE_OPERATIONS = {
-    "create_event", "update_event", "delete_event", "create_memo", "update_memo", "delete_memo",
-    "add_event_comment", "update_event_comment", "delete_event_comment", "update_calendar_labels",
+READ_OPERATIONS = {
+    "status", "list_calendars", "list_events", "sync_events", "list_memos",
+    "list_event_comments", "get_calendar_labels", "get_calendar_members", "get_calendar_virtual_members",
 }
 
 
@@ -76,13 +76,16 @@ try {
     const args = request.arguments || {};
     const apiHeaders = { "X-TimeTreeA": "web/2.1.0/en" };
 
-    async function requestJson(path, init = {}, requiresCsrf = false) {
-      const headers = { ...apiHeaders, ...(init.headers || {}) };
-      if (requiresCsrf) {
-        const token = document.querySelector('meta[name="csrf-token"]')?.content;
-        if (!token) throw new Error("TimeTree CSRF token unavailable; login again");
-        headers["X-CSRF-Token"] = token;
+    async function requestJson(path, init = {}) {
+      const method = String(init.method || "GET").toUpperCase();
+      // Read-only fork: only GET, plus the batch endpoint carrying GET ops.
+      if (method !== "GET") {
+        const ops = path === "/api/batch" ? (JSON.parse(init.body || "{}").ops || []) : null;
+        if (!ops || !ops.length || ops.some((op) => String(op.method).toLowerCase() !== "get")) {
+          throw new Error("Blocked non-read TimeTree request: " + method + " " + path);
+        }
       }
+      const headers = { ...apiHeaders, ...(init.headers || {}) };
       const response = await fetch(path, { ...init, headers, credentials: "include" });
       const text = await response.text();
       let body = text;
@@ -202,55 +205,6 @@ try {
       const response = await requestJson("/api/v1/calendars/" + args.calendar_id + "/virtual_users");
       return { authenticated: true, ...unwrap(response.body) };
     }
-    if (request.operation === "update_calendar_labels") {
-      const currentResponse = await requestJson("/api/v1/calendar/" + args.calendar_id + "/labels");
-      const current = arrayAt(unwrap(currentResponse.body), ["calendar_labels"]);
-      const updates = new Map(args.labels.map((label) => [Number(label.id), label]));
-      const merged = current.map((label) => {
-        const update = updates.get(Number(label.id)) || {};
-        return { id: Number(label.id), name: update.name ?? label.name ?? "", color: update.color ?? label.color ?? label.default_color };
-      });
-      for (const [id, update] of updates) {
-        if (!current.some((label) => Number(label.id) === id)) {
-          if (update.color === undefined) throw new Error("New label " + id + " requires color");
-          merged.push({ id, name: update.name ?? "", color: update.color });
-        }
-      }
-      const response = await requestJson("/api/v1/calendar/" + args.calendar_id + "/labels", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ calendar_labels: merged }) }, true);
-      return { authenticated: true, success: true, ...ok(response, "update_calendar_labels") };
-    }
-
-    const calendarId = args.calendar_id;
-    if (request.operation === "create_event" || request.operation === "create_memo") {
-      const response = await requestJson("/api/v1/calendar/" + calendarId + "/event", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(args.payload) }, true);
-      const body = ok(response, request.operation);
-      return { authenticated: true, success: true, event: body?.event ?? body };
-    }
-    if (request.operation === "update_event" || request.operation === "update_memo") {
-      const response = await requestJson("/api/v1/calendar/" + calendarId + "/event/" + args.event_uuid, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(args.payload) }, true);
-      const body = ok(response, request.operation);
-      return { authenticated: true, success: true, event: body?.event ?? body };
-    }
-    if (request.operation === "delete_event" || request.operation === "delete_memo") {
-      const response = await requestJson("/api/v1/calendar/" + calendarId + "/event/" + args.event_uuid, { method: "DELETE" }, true);
-      ok(response, request.operation);
-      return { authenticated: true, success: true, deleted_event_uuid: args.event_uuid };
-    }
-    if (request.operation === "add_event_comment") {
-      const response = await requestJson("/api/v1/calendar/" + calendarId + "/event/" + args.event_uuid + "/activity", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: crypto.randomUUID().replaceAll("-", ""), attachment: { content: args.content }, silent: args.silent ?? true }) }, true);
-      const body = ok(response, request.operation);
-      return { authenticated: true, success: true, comment: body?.event_activity ?? body };
-    }
-    if (request.operation === "update_event_comment") {
-      const response = await requestJson("/api/v1/calendar/" + calendarId + "/event/" + args.event_uuid + "/activity/" + args.comment_id, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ attachment: { content: args.content } }) }, true);
-      const body = ok(response, request.operation);
-      return { authenticated: true, success: true, comment: body?.event_activity ?? body };
-    }
-    if (request.operation === "delete_event_comment") {
-      const response = await requestJson("/api/v1/calendar/" + calendarId + "/event/" + args.event_uuid + "/activity/" + args.comment_id, { method: "DELETE" }, true);
-      ok(response, request.operation);
-      return { authenticated: true, success: true, deleted_comment_id: args.comment_id };
-    }
     throw new Error("Unsupported browser operation: " + request.operation);
   })()`);
   cliLog(marker + JSON.stringify(result));
@@ -262,7 +216,7 @@ try {
     return (
         template.replace("__REQUEST__", request)
         .replace("__MARKER__", RESULT_MARKER)
-        .replace("__NEEDS_APP__", json.dumps(operation in WRITE_OPERATIONS))
+        .replace("__NEEDS_APP__", "false")
         .replace("__TASK_SPACE__", json.dumps(TASK_SPACE_NAME))
     )
 
@@ -273,6 +227,8 @@ class EgoBrowserReader:
         self._lock = threading.RLock()
 
     def read(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if operation not in READ_OPERATIONS:
+            raise ValueError(f"Unsupported read-only browser operation: {operation}")
         with self._lock:
             payload = parse_result_line(self.runner(_script_for(operation, arguments)))
             if payload.get("error"):

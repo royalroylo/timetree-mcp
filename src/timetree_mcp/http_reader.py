@@ -1,11 +1,10 @@
-"""Direct HTTPS TimeTree client with in-memory cookie and CSRF handling."""
+"""Direct HTTPS read-only TimeTree client with an in-memory session cookie."""
 
 from __future__ import annotations
 
 import json
 import math
 import os
-import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -29,7 +28,6 @@ API_HEADERS = {
     "X-TimeTreeA": "web/2.1.0/en",
     "Referer": f"{BASE_URL}/",
 }
-CSRF_RE = re.compile(r'<meta\s+name=["\']csrf-token["\']\s+content=["\']([^"\']+)', re.I)
 
 
 @dataclass
@@ -37,6 +35,13 @@ class HttpResponse:
     status: int
     headers: Mapping[str, str]
     body: Any
+
+
+class ReadOnlyViolationError(RuntimeError):
+    """Raised when anything tries to send a TimeTree data write."""
+
+
+SIGNIN_PATH = "/api/v1/auth/email/signin"
 
 
 class TimeTreeHttpError(RuntimeError):
@@ -87,7 +92,10 @@ class UrllibTransport:
 
 
 class TimeTreeHttpReader:
-    """TimeTree reader/writer that never launches or depends on a browser."""
+    """Read-only TimeTree reader that never launches or depends on a browser.
+
+    Only GET requests are sent, plus the login PUT to the sign-in endpoint.
+    """
 
     def __init__(
         self,
@@ -105,7 +113,6 @@ class TimeTreeHttpReader:
         self.transport = transport or UrllibTransport()
         self.credential_store = credential_store or MacOSKeychainCredentialStore()
         self._authenticated = False
-        self._csrf_token: str | None = None
         self._lock = threading.RLock()
 
     def status(self) -> dict[str, Any]:
@@ -114,7 +121,7 @@ class TimeTreeHttpReader:
             return {
                 "authenticated": self._authenticated,
                 "credentials_configured": bool(email and password),
-                "csrf_available": bool(self._csrf_token),
+                "read_only": True,
                 "keychain": self.credential_store.status(),
                 "transport": "direct_https",
             }
@@ -128,7 +135,6 @@ class TimeTreeHttpReader:
                 "PUT",
                 f"{self.api_base}/auth/email/signin",
                 {"uid": email, "password": password, "uuid": uuid.uuid4().hex},
-                csrf=False,
             )
             if not 200 <= response.status < 300:
                 self._authenticated = False
@@ -136,9 +142,7 @@ class TimeTreeHttpReader:
                     raise RuntimeError("TimeTree login failed: invalid credentials or account access forbidden")
                 raise TimeTreeHttpError(f"TimeTree login failed with HTTP {response.status}", response.status)
             self._authenticated = True
-            self._csrf_token = None
-            self._refresh_csrf()
-            return {"authenticated": True, "csrf_available": bool(self._csrf_token), "transport": "direct_https"}
+            return {"authenticated": True, "read_only": True, "transport": "direct_https"}
 
     def logout(self) -> dict[str, Any]:
         with self._lock:
@@ -146,7 +150,6 @@ class TimeTreeHttpReader:
             if callable(clear):
                 clear()
             self._authenticated = False
-            self._csrf_token = None
             return {"authenticated": False, "transport": "direct_https"}
 
     def read(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -172,36 +175,10 @@ class TimeTreeHttpReader:
                 return self._list_event_comments(arguments)
             if operation == "get_calendar_labels":
                 return self._get_calendar_labels(arguments["calendar_id"])
-            if operation == "update_calendar_labels":
-                return self._update_calendar_labels(arguments)
             if operation == "get_calendar_members":
                 return self._get_calendar_members(arguments)
             if operation == "get_calendar_virtual_members":
                 return self._get_calendar_virtual_members(arguments)
-            if operation == "create_event":
-                return self._create_event(arguments)
-            if operation == "update_event":
-                return self._update_event(arguments)
-            if operation == "delete_event":
-                return self._delete_event(arguments)
-            if operation == "create_memo":
-                result = self._create_event(arguments)
-                result["memo"] = result.pop("event", None)
-                return result
-            if operation == "update_memo":
-                result = self._update_event(arguments)
-                result["memo"] = result.pop("event", None)
-                return result
-            if operation == "delete_memo":
-                result = self._delete_event(arguments)
-                result["deleted_memo_uuid"] = arguments["event_uuid"]
-                return result
-            if operation == "add_event_comment":
-                return self._add_event_comment(arguments)
-            if operation == "update_event_comment":
-                return self._update_event_comment(arguments)
-            if operation == "delete_event_comment":
-                return self._delete_event_comment(arguments)
             raise ValueError(f"Unsupported TimeTree operation: {operation}")
 
     def _credentials(self) -> tuple[str | None, str | None]:
@@ -209,8 +186,11 @@ class TimeTreeHttpReader:
         if not password:
             password_file = os.environ.get("TIMETREE_PASSWORD_FILE")
             if password_file:
+                path = Path(password_file).expanduser()
                 try:
-                    password = Path(password_file).read_text(encoding="utf-8").strip()
+                    if path.stat().st_mode & 0o077:
+                        raise RuntimeError("TIMETREE_PASSWORD_FILE must not be accessible by group/others (chmod 600)")
+                    password = path.read_text(encoding="utf-8").strip()
                 except OSError as exc:
                     raise RuntimeError("Unable to read TIMETREE_PASSWORD_FILE") from exc
         keychain_email, keychain_password = self.credential_store.read()
@@ -223,30 +203,17 @@ class TimeTreeHttpReader:
         if not self._authenticated:
             self.login()
 
-    def _refresh_csrf(self) -> None:
-        response = self._request_raw("GET", f"{self.base_url}/", csrf=False)
-        self._csrf_token = self._header(response.headers, "x-csrf-token")
-        if not self._csrf_token and isinstance(response.body, str):
-            match = CSRF_RE.search(response.body)
-            if match:
-                self._csrf_token = match.group(1)
+    def _request_raw(self, method: str, url: str, body: Any = None) -> HttpResponse:
+        method = method.upper()
+        is_signin = method == "PUT" and url == f"{self.base_url}{SIGNIN_PATH}"
+        if method != "GET" and not is_signin:
+            raise ReadOnlyViolationError(f"Blocked non-read TimeTree request: {method}")
+        if method == "GET" and body is not None:
+            raise ReadOnlyViolationError("Blocked TimeTree GET request with a body")
+        return self.transport.request(method, url, body, dict(API_HEADERS), 60)
 
-    def _request_raw(self, method: str, url: str, body: Any = None, csrf: bool = False) -> HttpResponse:
-        headers = dict(API_HEADERS)
-        if csrf:
-            if not self._csrf_token:
-                self._refresh_csrf()
-            if not self._csrf_token:
-                raise RuntimeError("TimeTree CSRF token unavailable; login again")
-            headers["X-CSRF-Token"] = self._csrf_token
-        response = self.transport.request(method, url, body, headers, 60)
-        response_token = self._header(response.headers, "x-csrf-token")
-        if response_token:
-            self._csrf_token = response_token
-        return response
-
-    def _request_json(self, method: str, url: str, body: Any = None, csrf: bool = False) -> Any:
-        response = self._request_raw(method, url, body, csrf)
+    def _request_json(self, method: str, url: str) -> Any:
+        response = self._request_raw(method, url)
         if not 200 <= response.status < 300:
             if response.status in (401, 403):
                 self._authenticated = False
@@ -383,25 +350,6 @@ class TimeTreeHttpReader:
         labels = body.get("calendar_labels") or []
         return {"calendar_id": cid, "labels": labels, "count": len(labels)}
 
-    def _update_calendar_labels(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        cid = calendar_id_value(arguments["calendar_id"])
-        current = self._get_calendar_labels(cid)["labels"]
-        updates = {int(label["id"]): label for label in arguments["labels"]}
-        current_ids = {int(label.get("id")) for label in current}
-        merged = []
-        for label in current:
-            update = updates.get(int(label.get("id")), {})
-            merged.append({"id": int(label["id"]), "name": update.get("name", label.get("name", "")), "color": update.get("color", label.get("color", label.get("default_color")))})
-        for label_id, update in updates.items():
-            if label_id in current_ids:
-                continue
-            if "color" not in update:
-                raise ValueError(f"new label {label_id} requires color")
-            merged.append({"id": label_id, "name": update.get("name", ""), "color": update["color"]})
-        body = self._body_dict(self._request_json("PUT", f"{self.api_base}/calendar/{cid}/labels", {"calendar_labels": merged}, csrf=True))
-        labels = body.get("calendar_labels") or merged
-        return {"success": True, "calendar_id": cid, "labels": labels, "count": len(labels)}
-
     def _get_calendar_members(self, arguments: dict[str, Any]) -> dict[str, Any]:
         cid = calendar_id_value(arguments["calendar_id"])
         body = self._body_dict(self._request_json("GET", f"{self.v2_api_base}/calendars/{cid}/users"))
@@ -417,49 +365,6 @@ class TimeTreeHttpReader:
         if not arguments.get("include_deactivated"):
             members = [member for member in members if not member.get("deactivated_at")]
         return {"calendar_id": cid, "virtual_members": members, "count": len(members)}
-
-    def _create_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        cid = calendar_id_value(arguments["calendar_id"])
-        body = self._body_dict(self._request_json("POST", f"{self.api_base}/calendar/{cid}/event", arguments["payload"], csrf=True))
-        raw = body.get("event") or body
-        return {"success": True, "event": normalize_event(raw, None)}
-
-    def _update_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        cid = calendar_id_value(arguments["calendar_id"])
-        event_uuid = arguments["event_uuid"]
-        body = self._body_dict(self._request_json("PUT", f"{self.api_base}/calendar/{cid}/event/{event_uuid}", arguments["payload"], csrf=True))
-        raw = body.get("event") or body
-        return {"success": True, "event": normalize_event(raw, None)}
-
-    def _delete_event(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        cid = calendar_id_value(arguments["calendar_id"])
-        event_uuid = arguments["event_uuid"]
-        response = self._request_raw("DELETE", f"{self.api_base}/calendar/{cid}/event/{event_uuid}", csrf=True)
-        if not 200 <= response.status < 300:
-            raise TimeTreeHttpError(f"TimeTree DELETE request failed with HTTP {response.status}", response.status)
-        return {"success": True, "deleted_event_uuid": event_uuid}
-
-    def _add_event_comment(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        cid = calendar_id_value(arguments["calendar_id"])
-        event_uuid = arguments["event_uuid"]
-        body = self._body_dict(self._request_json("POST", f"{self.api_base}/calendar/{cid}/event/{event_uuid}/activity", {"id": uuid.uuid4().hex, "attachment": {"content": arguments["content"]}, "silent": arguments.get("silent", True)}, csrf=True))
-        return {"success": True, "comment": self._format_comment(body.get("event_activity") or body, cid, event_uuid)}
-
-    def _update_event_comment(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        cid = calendar_id_value(arguments["calendar_id"])
-        event_uuid = arguments["event_uuid"]
-        comment_id = arguments["comment_id"]
-        body = self._body_dict(self._request_json("PUT", f"{self.api_base}/calendar/{cid}/event/{event_uuid}/activity/{comment_id}", {"attachment": {"content": arguments["content"]}}, csrf=True))
-        return {"success": True, "comment": self._format_comment(body.get("event_activity") or body, cid, event_uuid)}
-
-    def _delete_event_comment(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        cid = calendar_id_value(arguments["calendar_id"])
-        event_uuid = arguments["event_uuid"]
-        comment_id = arguments["comment_id"]
-        response = self._request_raw("DELETE", f"{self.api_base}/calendar/{cid}/event/{event_uuid}/activity/{comment_id}", csrf=True)
-        if not 200 <= response.status < 300:
-            raise TimeTreeHttpError(f"TimeTree DELETE request failed with HTTP {response.status}", response.status)
-        return {"success": True, "deleted_comment_id": comment_id}
 
     @staticmethod
     def _format_comment(comment: dict[str, Any], calendar_id: str, event_uuid: str) -> dict[str, Any]:

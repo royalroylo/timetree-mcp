@@ -44,13 +44,10 @@ Run the NPM wrapper from the checkout:
 TIMETREE_PYTHON="$PWD/.venv/bin/python" node bin/timetree-mcp.js
 ```
 
-## Read and write workflow
+## Read workflow
 
-Start with `timetree_status`, then list calendars before querying or mutating a
-target. Use `timetree_list_events` for a bounded date range and inspect the
-returned event identifiers before an update or delete. Every mutation must
-include `confirm: true`; deletes should always receive a separate explicit
-confirmation immediately before the call.
+Start with `timetree_status`, then list calendars before querying. Use
+`timetree_list_events` for a bounded date range. This fork has no write tools.
 
 ## Background monitoring
 

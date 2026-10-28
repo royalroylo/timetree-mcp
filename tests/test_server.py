@@ -22,8 +22,6 @@ class FakeBrowser:
             return {"calendars": [{"id": "personal", "name": "Personal"}]}
         if operation == "list_events":
             return {"events": [{"id": "event-1", "title": "Lunch"}]}
-        if operation == "create_event":
-            return {"success": True, "event": {"id": "created"}}
         if operation == "get_calendar_labels":
             return {"calendar_labels": []}
         raise AssertionError(f"unexpected operation: {operation}")
@@ -63,19 +61,9 @@ class ServerProtocolTests(unittest.TestCase):
             "timetree_login",
             "timetree_logout",
             "timetree_keychain_status",
-            "timetree_create_event",
-            "timetree_update_event",
-            "timetree_delete_event",
             "timetree_list_memos",
-            "timetree_create_memo",
-            "timetree_update_memo",
-            "timetree_delete_memo",
             "timetree_list_event_comments",
-            "timetree_add_event_comment",
-            "timetree_update_event_comment",
-            "timetree_delete_event_comment",
             "timetree_get_calendar_labels",
-            "timetree_update_calendar_labels",
             "timetree_get_calendar_members",
             "timetree_get_calendar_virtual_members",
             "timetree_start_monitor",
@@ -100,22 +88,12 @@ class ServerProtocolTests(unittest.TestCase):
             "timetree_keychain_status": (True, False, True, False),
             "timetree_login": (False, False, False, True),
             "timetree_logout": (False, True, True, False),
-            "timetree_create_event": (False, False, False, True),
-            "timetree_create_memo": (False, False, False, True),
-            "timetree_add_event_comment": (False, False, False, True),
-            "timetree_update_event": (False, True, False, True),
-            "timetree_update_memo": (False, True, False, True),
-            "timetree_update_event_comment": (False, True, False, True),
-            "timetree_update_calendar_labels": (False, True, False, True),
-            "timetree_delete_event": (False, True, True, True),
-            "timetree_delete_memo": (False, True, True, True),
-            "timetree_delete_event_comment": (False, True, True, True),
             "timetree_start_monitor": (False, False, True, True),
             "timetree_stop_monitor": (False, True, True, False),
         }
 
         self.assertEqual(set(by_name), set(expected))
-        self.assertEqual(len(tools), 24)
+        self.assertEqual(len(tools), 14)
         for name, values in expected.items():
             with self.subTest(tool=name):
                 annotations = by_name[name]["annotations"]
@@ -202,54 +180,27 @@ class ServerProtocolTests(unittest.TestCase):
         payload = json.loads(response["result"]["content"][0]["text"])
         self.assertEqual(payload["events"][0]["title"], "Lunch")
 
-    def test_mutating_tool_requires_explicit_confirmation_without_calling_browser(self):
-        response = self.server.handle(
-            {
-                "jsonrpc": "2.0",
-                "id": 6,
-                "method": "tools/call",
-                "params": {
-                    "name": "timetree_create_event",
-                    "arguments": {
-                        "calendar_id": "personal",
-                        "title": "No write",
-                        "start_at": "2026-08-25T01:00:00Z",
-                        "end_at": "2026-08-25T02:00:00Z",
-                        "confirm": False,
-                    },
-                },
-            }
-        )
-
-        self.assertTrue(response["result"]["isError"])
-        self.assertIn("confirm", response["result"]["structuredContent"]["error"])
+    def test_write_tools_are_not_listed_or_callable(self):
+        names = {tool["name"] for tool in TimeTreeMcpServer.tool_definitions()}
+        for tool in (
+            "timetree_create_event", "timetree_update_event", "timetree_delete_event",
+            "timetree_create_memo", "timetree_update_memo", "timetree_delete_memo",
+            "timetree_add_event_comment", "timetree_update_event_comment", "timetree_delete_event_comment",
+            "timetree_update_calendar_labels",
+        ):
+            with self.subTest(tool=tool):
+                self.assertNotIn(tool, names)
+                response = self.server.handle(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 6,
+                        "method": "tools/call",
+                        "params": {"name": tool, "arguments": {"calendar_id": "personal", "confirm": True}},
+                    }
+                )
+                self.assertTrue(response["result"]["isError"])
+                self.assertIn("Unknown TimeTree tool", response["result"]["structuredContent"]["error"])
         self.assertEqual(self.browser.calls, [])
-
-    def test_confirmed_create_event_builds_payload_and_calls_browser(self):
-        response = self.server.handle(
-            {
-                "jsonrpc": "2.0",
-                "id": 7,
-                "method": "tools/call",
-                "params": {
-                    "name": "timetree_create_event",
-                    "arguments": {
-                        "calendar_id": "personal",
-                        "title": "Created",
-                        "start_at": "2026-08-25T01:00:00Z",
-                        "end_at": "2026-08-25T02:00:00Z",
-                        "confirm": True,
-                    },
-                },
-            }
-        )
-
-        operation, arguments = self.browser.calls[0]
-        self.assertEqual(operation, "create_event")
-        self.assertEqual(arguments["calendar_id"], "personal")
-        self.assertEqual(arguments["payload"]["start_at"], 1787619600000)
-        self.assertNotIn("confirm", arguments["payload"])
-        self.assertFalse(response["result"]["isError"])
 
     def test_read_metadata_and_monitor_status_do_not_require_browser_writes(self):
         labels = self.server.handle(
